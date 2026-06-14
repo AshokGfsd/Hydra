@@ -384,6 +384,48 @@ export default function Home() {
     [renderAssistant]
   );
 
+  const autoExtractMemories = useCallback(async (userMsg: string) => {
+    let key = '';
+    let content = '';
+    let type: 'fact' | 'task' | 'preference' = 'fact';
+
+    const nameMatch = userMsg.match(/(?:my name is|call me|i[''\u2019]?m\s+)(\w+)/i);
+    if (nameMatch) {
+      key = 'user_name';
+      content = nameMatch[1];
+      type = 'fact';
+    }
+
+    const taskMatch = userMsg.match(/(?:remember|save this|note that|my task is|i usually|i need you to|every time)\s+(.+)/i);
+    if (!key && taskMatch) {
+      key = 'task_' + Date.now();
+      content = taskMatch[1].trim();
+      type = 'task';
+    }
+
+    const prefMatch = userMsg.match(/(?:i like|i prefer|i want)\s+(.+)/i);
+    if (!key && prefMatch) {
+      key = 'preference_' + Date.now();
+      content = prefMatch[1].trim();
+      type = 'preference';
+    }
+
+    if (!key) return;
+
+    try {
+      const res = await fetch('/api/memory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, content, type }),
+      });
+      const data = await res.json();
+      if (data.memory) {
+        if (key === 'user_name') setUserName(content);
+        showToast(`🧠 Stored: ${key}`, 'success', 3000);
+      }
+    } catch {}
+  }, [showToast]);
+
   const streamChatLocal = useCallback(async () => {
     setIsStreaming(true);
     const el = chatRef.current;
@@ -397,7 +439,7 @@ export default function Home() {
     try {
       const ctx = await buildMemoryContext();
       const msgs = ctx
-        ? [{ role: 'system' as const, content: `Memory context:\n${ctx}\nAddress the user by their name if known.` }, ...messages]
+        ? [{ role: 'system' as const, content: `You have the following confirmed information about the user. Treat this as absolute fact — do NOT say you don't know or ask for this information:\n${ctx}` }, ...messages]
         : messages;
       const body: Record<string, any> = {
         messages: msgs,
@@ -434,13 +476,15 @@ export default function Home() {
       setMessages((prev) => [...prev, { role: 'assistant', content: full }]);
       if (currentChatId) await persistMessage('assistant', full);
       showToast('Response complete', 'success', 2000);
+      const lastUser = messages.filter((m) => m.role === 'user').pop();
+      if (lastUser) autoExtractMemories(lastUser.content);
     } catch (err: any) {
       if (bubbleContent)
         bubbleContent.innerHTML = `<div class="text-red-400 font-mono text-xs">&gt; NETWORK_ERROR: ${err.message}</div>`;
       showToast('Connection failed', 'error');
     }
     setIsStreaming(false);
-  }, [messages, chatParams, currentChatId, persistMessage, handleStreamResponse, showToast, enhanceCodeBlocks]);
+  }, [messages, chatParams, currentChatId, persistMessage, handleStreamResponse, showToast, enhanceCodeBlocks, autoExtractMemories]);
 
   const handleSend = useCallback(async () => {
     const text = inputRef.current?.value.trim();
@@ -501,7 +545,7 @@ export default function Home() {
       try {
         const ctx = await buildMemoryContext();
         const onlineMsgs = ctx
-          ? [{ role: 'system' as const, content: `Memory context:\n${ctx}\nAddress the user by their name if known.` }, ...messages, { role: 'user', content: text }]
+          ? [{ role: 'system' as const, content: `You have the following confirmed information about the user. Treat this as absolute fact — do NOT say you don't know or ask for this information:\n${ctx}` }, ...messages, { role: 'user', content: text }]
           : [...messages, { role: 'user', content: text }];
         const res = await fetch('/api/chat/online-stream', {
           method: 'POST',
@@ -521,12 +565,14 @@ export default function Home() {
         setMessages((prev) => [...prev, { role: 'assistant', content: full }]);
         if (currentChatId) await persistMessage('assistant', full);
         showToast('Response complete', 'success', 2000);
+        const lastUser = messages.filter((m) => m.role === 'user').pop();
+        if (lastUser) autoExtractMemories(lastUser.content);
       } catch {
         showToast('Connection failed', 'error');
       }
       setIsStreaming(false);
     }
-  }, [isStreaming, currentChatId, newChat, messages, mode, persistMessage, addSystemNote, streamChatLocal, model, apiKey, handleStreamResponse, showToast, addBubbleToDOM]);
+  }, [isStreaming, currentChatId, newChat, messages, mode, persistMessage, addSystemNote, streamChatLocal, model, apiKey, handleStreamResponse, showToast, addBubbleToDOM, autoExtractMemories]);
 
   const commands = [
     { name: 'New Chat', shortcut: 'Ctrl+N', action: () => newChat() },
