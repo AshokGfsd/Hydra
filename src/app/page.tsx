@@ -52,6 +52,7 @@ export default function Home() {
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
+  const [modePreset, setModePreset] = useState<'normal' | 'advanced'>('normal');
   const [userName, setUserName] = useState('');
   const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -75,7 +76,7 @@ export default function Home() {
     topP: 1,
     frequencyPenalty: 0,
     presencePenalty: 0,
-    maxTokens: 65536,
+    maxTokens: 4096,
     stop: '',
     seed: 0,
     enableReasoning: false,
@@ -198,6 +199,38 @@ export default function Home() {
     },
     [currentChatId, fetchApi, loadChatList]
   );
+
+  function stripMeta(msgs: any[]): Array<{ role: string; content: string }> {
+    return msgs.map(({ role, content }) => ({ role, content }));
+  }
+
+  function ensureAlternation(msgs: Array<{ role: string; content: string }>): Array<{ role: string; content: string }> {
+    const result: Array<{ role: string; content: string }> = [];
+    let first = true;
+    for (const m of msgs) {
+      if (first) {
+        result.push(m);
+        first = false;
+        continue;
+      }
+      if (m.role === 'system') {
+        result.push(m);
+        continue;
+      }
+      const last = result[result.length - 1];
+      if (last.role !== 'system' && last.role === m.role) {
+        const fill = m.role === 'user' ? 'assistant' : 'user';
+        result.push({ role: fill, content: '' });
+      }
+      result.push(m);
+    }
+    return result;
+  }
+
+
+  function cleanResponse(text: string): string {
+    return text.replace(/__nli_\w+:\s*[^\s][^_\s]*(\s|$)/g, '').replace(/\s+/g, ' ').trim();
+  }
 
   const enhanceCodeBlocks = useCallback(
     (container: HTMLElement) => {
@@ -352,6 +385,7 @@ export default function Home() {
       let buffer = '';
       let full = '';
       let reasoning = '';
+      let streamError = '';
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -366,7 +400,7 @@ export default function Home() {
           try {
             const json = JSON.parse(data);
             if (json.error) {
-              aiBubble.innerHTML = `<div class="md-content"><div class="text-red-400 font-mono text-xs">&gt; ERROR: ${json.error}</div></div>`;
+              streamError = json.error;
               continue;
             }
             const delta = json.choices?.[0]?.delta || {};
@@ -379,7 +413,8 @@ export default function Home() {
           } catch { }
         }
       }
-      return full;
+      if (streamError) throw new Error(streamError);
+      return cleanResponse(full);
     },
     [renderAssistant]
   );
@@ -426,6 +461,11 @@ export default function Home() {
     } catch {}
   }, [showToast]);
 
+  function parseMaxTokensFromError(msg: string): number | null {
+    const m = msg.match(/maximum context length is (\d+) tokens/);
+    return m ? parseInt(m[1]) : null;
+  }
+
   const streamChatLocal = useCallback(async () => {
     setIsStreaming(true);
     const el = chatRef.current;
@@ -436,55 +476,88 @@ export default function Home() {
     el.appendChild(aiBubble);
     const bubbleContent = aiBubble.querySelector('.md-content') as HTMLElement;
     let full = '';
-    try {
-      const ctx = await buildMemoryContext();
-      const msgs = ctx
-        ? [{ role: 'system' as const, content: `You have the following confirmed information about the user. Treat this as absolute fact — do NOT say you don't know or ask for this information:\n${ctx}` }, ...messages]
-        : messages;
-      const body: Record<string, any> = {
-        messages: msgs,
-        temperature: chatParams.temperature,
-        top_p: chatParams.topP,
-        frequency_penalty: chatParams.frequencyPenalty,
-        presence_penalty: chatParams.presencePenalty,
-        max_tokens: chatParams.maxTokens,
-        seed: chatParams.seed || undefined,
-        stream: chatParams.stream,
-      };
-      if (chatParams.stop)
-        body.stop = chatParams.stop
-          .split(',')
-          .map((s: string) => s.trim())
-          .filter(Boolean);
-      if (chatParams.enableReasoning && chatParams.reasoningBudget > 0) {
-        body.reasoning_budget = chatParams.reasoningBudget;
-      }
-      const res = await fetch('/api/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!chatParams.stream) {
-        const data = await res.json();
-        full = data.choices?.[0]?.message?.content || '';
+    let maxTokens = chatParams.maxTokens;
+    const ctx = await buildMemoryContext();
+    const msgs = ctx
+      ? [{ role: 'system' as const, content: `You have the following confirmed information about the user. Treat this as absolute fact — do NOT say you don't know or ask for this information:\n${ctx}` }, ...messages]
+      : messages;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const body: Record<string, any> = {
+          messages: ensureAlternation(stripMeta(msgs)),
+          temperature: chatParams.temperature,
+          top_p: chatParams.topP,
+          frequency_penalty: chatParams.frequencyPenalty,
+          presence_penalty: chatParams.presencePenalty,
+          max_tokens: maxTokens,
+          seed: chatParams.seed || undefined,
+          stream: chatParams.stream,
+        };
+        if (chatParams.stop)
+          body.stop = chatParams.stop
+            .split(',')
+            .map((s: string) => s.trim())
+            .filter(Boolean);
+        if (chatParams.enableReasoning && chatParams.reasoningBudget > 0) {
+          body.reasoning_budget = chatParams.reasoningBudget;
+        }
+        const res = await fetch('/api/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!chatParams.stream) {
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+            full = data.choices?.[0]?.message?.content || '';
+            full = cleanResponse(full);
+            if (bubbleContent)
+            bubbleContent.innerHTML = (marked.parse(full) as string) || full;
+          enhanceCodeBlocks(aiBubble);
+        } else if (res.body) {
+          full = await handleStreamResponse(res, aiBubble);
+        }
+        setMessages((prev) => [...prev, { role: 'assistant', content: full }]);
+        if (currentChatId) await persistMessage('assistant', full);
+        showToast('Response complete', 'success', 2000);
+        const lastUser = messages.filter((m) => m.role === 'user').pop();
+        if (lastUser) autoExtractMemories(lastUser.content);
+        setIsStreaming(false);
+        return;
+      } catch (err: any) {
+        const msg = err.message || '';
+        if (attempt === 0) {
+          try {
+            const fixRes = await fetch('/api/fix-error', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ error: msg, model }),
+            });
+            const fix = await fixRes.json();
+            if (fix.fixed && fix.changes) {
+              if (fix.changes.max_tokens) maxTokens = parseInt(fix.changes.max_tokens) || maxTokens;
+              showToast(`AI fixed: ${fix.explanation}`, 'info', 4000);
+              if (bubbleContent) bubbleContent.innerHTML = '';
+              continue;
+            }
+          } catch {}
+          const maxCtx = parseMaxTokensFromError(msg);
+          if (maxCtx) {
+            maxTokens = Math.min(maxTokens, maxCtx - 500);
+            showToast(`Adjusted max_tokens to ${maxTokens}`, 'info', 3000);
+            if (bubbleContent) bubbleContent.innerHTML = '';
+            continue;
+          }
+        }
         if (bubbleContent)
-          bubbleContent.innerHTML = (marked.parse(full) as string) || full;
-        enhanceCodeBlocks(aiBubble);
-      } else if (res.body) {
-        full = await handleStreamResponse(res, aiBubble);
+          bubbleContent.innerHTML = `<div class="text-red-400 font-mono text-xs">&gt; ERROR: ${msg}</div>`;
+        showToast('Request failed', 'error');
+        break;
       }
-      setMessages((prev) => [...prev, { role: 'assistant', content: full }]);
-      if (currentChatId) await persistMessage('assistant', full);
-      showToast('Response complete', 'success', 2000);
-      const lastUser = messages.filter((m) => m.role === 'user').pop();
-      if (lastUser) autoExtractMemories(lastUser.content);
-    } catch (err: any) {
-      if (bubbleContent)
-        bubbleContent.innerHTML = `<div class="text-red-400 font-mono text-xs">&gt; NETWORK_ERROR: ${err.message}</div>`;
-      showToast('Connection failed', 'error');
     }
     setIsStreaming(false);
-  }, [messages, chatParams, currentChatId, persistMessage, handleStreamResponse, showToast, enhanceCodeBlocks, autoExtractMemories]);
+  }, [messages, chatParams, currentChatId, persistMessage, handleStreamResponse, showToast, enhanceCodeBlocks, autoExtractMemories, model]);
 
   const handleSend = useCallback(async () => {
     const text = inputRef.current?.value.trim();
@@ -541,34 +614,65 @@ export default function Home() {
       aiBubble.className = 'flex justify-start animate-slide-up';
       aiBubble.innerHTML = `<div class="max-w-[90%] sm:max-w-[80%] lg:max-w-[70%]"><div class="flex items-center gap-2 mb-1.5"><div class="w-5 h-5 rounded bg-gradient-to-br from-terminal-accent2/30 to-terminal-accent/30 flex items-center justify-center"><span class="text-[8px] text-terminal-accent2 font-bold">AI</span></div><span class="text-[10px] text-terminal-accent2 font-mono">ASSISTANT</span></div><div class="rounded-xl px-4 py-3 text-sm leading-relaxed msg-ai"><div class="md-content"></div></div></div>`;
       el?.appendChild(aiBubble);
+      const onlineBubbleContent = aiBubble.querySelector('.md-content') as HTMLElement;
       let full = '';
-      try {
-        const ctx = await buildMemoryContext();
-        const onlineMsgs = ctx
-          ? [{ role: 'system' as const, content: `You have the following confirmed information about the user. Treat this as absolute fact — do NOT say you don't know or ask for this information:\n${ctx}` }, ...messages, { role: 'user', content: text }]
-          : [...messages, { role: 'user', content: text }];
-        const res = await fetch('/api/chat/online-stream', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model,
-            messages: onlineMsgs,
-            apiKey,
-          }),
-        });
-        if (!res.ok || !res.body) {
-          showToast('Online stream failed', 'error');
-          setIsStreaming(false);
-          return;
+      let onlineMaxTokens = chatParams.maxTokens;
+      const ctx = await buildMemoryContext();
+      const onlineMsgs = ctx
+        ? [{ role: 'system' as const, content: `You have the following confirmed information about the user. Treat this as absolute fact — do NOT say you don't know or ask for this information:\n${ctx}` }, ...messages, { role: 'user', content: text }]
+        : [...messages, { role: 'user', content: text }];
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch('/api/chat/online-stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model,
+              messages: ensureAlternation(stripMeta(onlineMsgs)),
+              apiKey,
+              max_tokens: onlineMaxTokens,
+            }),
+          });
+          if (!res.ok || !res.body) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error || `HTTP ${res.status}`);
+          }
+          full = await handleStreamResponse(res, aiBubble, true);
+          setMessages((prev) => [...prev, { role: 'assistant', content: full }]);
+          if (currentChatId) await persistMessage('assistant', full);
+          showToast('Response complete', 'success', 2000);
+          const lastUser = messages.filter((m) => m.role === 'user').pop();
+          if (lastUser) autoExtractMemories(lastUser.content);
+          break;
+        } catch (err: any) {
+          const msg = err.message || '';
+          if (attempt === 0) {
+            try {
+              const fixRes = await fetch('/api/fix-error', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: msg, model }),
+              });
+              const fix = await fixRes.json();
+              if (fix.fixed && fix.changes) {
+                if (fix.changes.max_tokens) onlineMaxTokens = parseInt(fix.changes.max_tokens) || onlineMaxTokens;
+                showToast(`AI fixed: ${fix.explanation}`, 'info', 4000);
+                if (onlineBubbleContent) onlineBubbleContent.innerHTML = '';
+                continue;
+              }
+            } catch {}
+            const maxCtx = parseMaxTokensFromError(msg);
+            if (maxCtx) {
+              onlineMaxTokens = Math.min(onlineMaxTokens, maxCtx - 500);
+              showToast(`Adjusted max_tokens to ${onlineMaxTokens}`, 'info', 3000);
+              if (onlineBubbleContent) onlineBubbleContent.innerHTML = '';
+              continue;
+            }
+          }
+          showToast(`Online request failed: ${msg}`, 'error');
+          break;
         }
-        full = await handleStreamResponse(res, aiBubble, true);
-        setMessages((prev) => [...prev, { role: 'assistant', content: full }]);
-        if (currentChatId) await persistMessage('assistant', full);
-        showToast('Response complete', 'success', 2000);
-        const lastUser = messages.filter((m) => m.role === 'user').pop();
-        if (lastUser) autoExtractMemories(lastUser.content);
-      } catch {
-        showToast('Connection failed', 'error');
       }
       setIsStreaming(false);
     }
@@ -1875,7 +1979,7 @@ export default function Home() {
               value={chatParams.maxTokens}
               min={1}
               max={131072}
-              onChange={(e) => setChatParams((p) => ({ ...p, maxTokens: parseInt(e.target.value) || 65536 }))}
+              onChange={(e) => setChatParams((p) => ({ ...p, maxTokens: parseInt(e.target.value) || 4096 }))}
             />
           </div>
 
@@ -2183,6 +2287,44 @@ export default function Home() {
                   </span>
                 </button>
               </div>
+              <div className="flex bg-terminal-elevated rounded-lg overflow-hidden border border-terminal-border p-0.5 text-xs font-mono">
+                <button
+                  className={`mode-btn px-2 py-1.5 rounded-md relative z-10 ${modePreset === 'normal' ? 'active' : 'text-terminal-muted'
+                    }`}
+                  onClick={() => {
+                    setModePreset('normal');
+                    setChatParams((p) => ({
+                      ...p,
+                      stream: true,
+                      temperature: 0,
+                      topP: 1,
+    maxTokens: 4096,
+                      frequencyPenalty: 0,
+                      presencePenalty: 0,
+                    }));
+                  }}
+                >
+                  <span className="relative z-10">Stream</span>
+                </button>
+                <button
+                  className={`mode-btn px-2 py-1.5 rounded-md relative z-10 ${modePreset === 'advanced' ? 'active' : 'text-terminal-muted'
+                    }`}
+                  onClick={() => {
+                    setModePreset('advanced');
+                    setChatParams((p) => ({
+                      ...p,
+                      stream: false,
+                      temperature: 0.6,
+                      topP: 0.95,
+                      maxTokens: 4096,
+                      frequencyPenalty: 0,
+                      presencePenalty: 0,
+                    }));
+                  }}
+                >
+                  <span className="relative z-10">Advanced</span>
+                </button>
+              </div>
               <select
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
@@ -2282,6 +2424,44 @@ export default function Home() {
                   </svg>
                   Online
                 </span>
+              </button>
+            </div>
+            <div className="flex bg-terminal-elevated rounded-lg overflow-hidden border border-terminal-border p-0.5 text-xs font-mono">
+              <button
+                className={`mode-btn px-2 py-1.5 rounded-md relative z-10 ${modePreset === 'normal' ? 'active' : 'text-terminal-muted'
+                  }`}
+                onClick={() => {
+                  setModePreset('normal');
+                  setChatParams((p) => ({
+                    ...p,
+                    stream: true,
+                    temperature: 0,
+                    topP: 1,
+                    maxTokens: 4096,
+                    frequencyPenalty: 0,
+                    presencePenalty: 0,
+                  }));
+                }}
+              >
+                <span className="relative z-10">Stream</span>
+              </button>
+              <button
+                className={`mode-btn px-2 py-1.5 rounded-md relative z-10 ${modePreset === 'advanced' ? 'active' : 'text-terminal-muted'
+                  }`}
+                onClick={() => {
+                  setModePreset('advanced');
+                  setChatParams((p) => ({
+                    ...p,
+                    stream: false,
+                    temperature: 0.6,
+                    topP: 0.95,
+                    maxTokens: 4096,
+                    frequencyPenalty: 0,
+                    presencePenalty: 0,
+                  }));
+                }}
+              >
+                <span className="relative z-10">Advanced</span>
               </button>
             </div>
             <select
