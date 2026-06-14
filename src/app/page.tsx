@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { MODELS } from '@/types';
+import { marked } from 'marked';
+import MarkdownViewer from '@/components/preview/MarkdownViewer';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -43,6 +45,8 @@ export default function Home() {
   const [chatList, setChatList] = useState<Chat[]>([]);
   const [lastGeneratedHTML, setLastGeneratedHTML] = useState('');
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [lastGeneratedMD, setLastGeneratedMD] = useState('');
+  const [mdPreviewOpen, setMdPreviewOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -227,6 +231,16 @@ export default function Home() {
           };
           btnGroup.appendChild(previewBtn);
         }
+        if (lang === 'markdown' || lang === 'md') {
+          const mdPreviewBtn = document.createElement('button');
+          mdPreviewBtn.textContent = 'Preview MD';
+          mdPreviewBtn.onclick = () => {
+            setLastGeneratedMD(block.textContent || '');
+            setMdPreviewOpen(true);
+            showToast('Markdown preview loaded', 'success');
+          };
+          btnGroup.appendChild(mdPreviewBtn);
+        }
         const copyBtn = document.createElement('button');
         copyBtn.textContent = 'Copy';
         copyBtn.onclick = () => {
@@ -287,7 +301,7 @@ export default function Home() {
       else {
         const mdDiv = document.createElement('div');
         mdDiv.className = 'md-content';
-        mdDiv.innerHTML = (window as any).marked?.parse(text || '') || text;
+        mdDiv.innerHTML = (marked.parse(text || '') as string) || text;
         bubble.appendChild(mdDiv);
       }
       container.appendChild(header);
@@ -305,10 +319,10 @@ export default function Home() {
     (bubble: HTMLElement, full: string, reasoning: string) => {
       let out = '';
       if (reasoning && showThinking) {
-        out += `<div class="thinking-block"><div class="flex items-center gap-2 mb-1"><span style="font-size:0.75em">🧠</span><span class="text-[10px] text-terminal-accent3 font-mono uppercase">Reasoning</span></div>${(window as any).marked?.parseInline(reasoning) || reasoning
+        out += `<div class="thinking-block"><div class="flex items-center gap-2 mb-1"><span style="font-size:0.75em">🧠</span><span class="text-[10px] text-terminal-accent3 font-mono uppercase">Reasoning</span></div>${(marked.parseInline(reasoning) as string) || reasoning
           }</div>`;
       }
-      out += (window as any).marked?.parse(full || '') || full;
+      out += (marked.parse(full || '') as string) || full;
       bubble.innerHTML = `<div class="md-content">${out}</div>`;
       enhanceCodeBlocks(bubble);
       if (autoScroll && chatRef.current)
@@ -405,7 +419,7 @@ export default function Home() {
         const data = await res.json();
         full = data.choices?.[0]?.message?.content || '';
         if (bubbleContent)
-          bubbleContent.innerHTML = (window as any).marked?.parse(full) || full;
+          bubbleContent.innerHTML = (marked.parse(full) as string) || full;
         enhanceCodeBlocks(aiBubble);
       } else if (res.body) {
         full = await handleStreamResponse(res, aiBubble);
@@ -2285,6 +2299,55 @@ export default function Home() {
               </div>
             </div>
             <iframe srcDoc={lastGeneratedHTML} className="w-full h-72 bg-white rounded-none" title="Preview" />
+          </div>
+        )}
+
+        {mdPreviewOpen && lastGeneratedMD && (
+          <div className="border-t border-terminal-border bg-terminal-surface/80 backdrop-blur-sm">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-terminal-border">
+              <div className="flex items-center gap-2">
+                <span className="text-terminal-accent3 text-lg">≡</span>
+                <span className="text-sm font-semibold text-terminal-accent3 font-mono">
+                  rendered_markdown.md
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(lastGeneratedMD);
+                    showToast('Markdown copied to clipboard', 'success');
+                  }}
+                  className="text-xs px-3 py-1.5 rounded-md bg-terminal-elevated border border-terminal-border text-terminal-muted hover:text-terminal-accent hover:border-terminal-accent/30 transition-all font-mono"
+                  data-tooltip="Copy Markdown"
+                >
+                  Copy MD
+                </button>
+                <button
+                  onClick={() => {
+                    const blob = new Blob([lastGeneratedMD], { type: 'text/markdown' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `doc-${Date.now()}.md`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    showToast('File downloaded', 'success');
+                  }}
+                  className="text-xs px-3 py-1.5 rounded-md bg-terminal-accent3/10 border border-terminal-accent3/30 text-terminal-accent3 hover:bg-terminal-accent3/20 transition-all font-mono"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={() => setMdPreviewOpen(false)}
+                  className="text-xs px-3 py-1.5 rounded-md bg-terminal-elevated border border-terminal-border text-terminal-muted hover:text-white hover:border-red-500/30 transition-all font-mono"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="p-4 max-h-96 overflow-y-auto">
+              <MarkdownViewer content={lastGeneratedMD} />
+            </div>
           </div>
         )}
 
