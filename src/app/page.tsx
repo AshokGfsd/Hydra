@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { MODELS } from '@/types';
 import { marked } from 'marked';
 import MarkdownViewer from '@/components/preview/MarkdownViewer';
+import MemoryPanel from '@/components/memory/MemoryPanel';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -51,6 +52,8 @@ export default function Home() {
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
+  const [userName, setUserName] = useState('');
+  const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingText, setLoadingText] = useState('Establishing connection...');
   const [loadingPct, setLoadingPct] = useState(0);
@@ -392,8 +395,12 @@ export default function Home() {
     const bubbleContent = aiBubble.querySelector('.md-content') as HTMLElement;
     let full = '';
     try {
+      const ctx = await buildMemoryContext();
+      const msgs = ctx
+        ? [{ role: 'system' as const, content: `Memory context:\n${ctx}\nAddress the user by their name if known.` }, ...messages]
+        : messages;
       const body: Record<string, any> = {
-        messages,
+        messages: msgs,
         temperature: chatParams.temperature,
         top_p: chatParams.topP,
         frequency_penalty: chatParams.frequencyPenalty,
@@ -492,12 +499,16 @@ export default function Home() {
       el?.appendChild(aiBubble);
       let full = '';
       try {
+        const ctx = await buildMemoryContext();
+        const onlineMsgs = ctx
+          ? [{ role: 'system' as const, content: `Memory context:\n${ctx}\nAddress the user by their name if known.` }, ...messages, { role: 'user', content: text }]
+          : [...messages, { role: 'user', content: text }];
         const res = await fetch('/api/chat/online-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model,
-            messages: [...messages, { role: 'user', content: text }],
+            messages: onlineMsgs,
             apiKey,
           }),
         });
@@ -561,7 +572,29 @@ export default function Home() {
       shortcut: 'Ctrl+P',
       action: () => setPreviewOpen((v) => !v),
     },
+    {
+      name: 'Memory',
+      shortcut: 'Ctrl+Shift+M',
+      action: () => setMemoryPanelOpen((v) => !v),
+    },
   ];
+
+  async function buildMemoryContext(): Promise<string> {
+    const parts: string[] = [];
+    if (userName) parts.push(`User's name is ${userName}.`);
+    try {
+      const res = await fetch('/api/memory');
+      const data = await res.json();
+      const memories: any[] = data.memories || [];
+      if (memories.length > 0) {
+        parts.push('Relevant memories from past sessions:');
+        memories.forEach((m) => {
+          parts.push(`- [${m.type}] ${m.key}: ${m.content}`);
+        });
+      }
+    } catch {}
+    return parts.length > 0 ? parts.join('\n') : '';
+  }
 
   function exportChat() {
     if (!messages.length) return showToast('No messages to export', 'info');
@@ -695,6 +728,16 @@ export default function Home() {
     run();
   }, []);
 
+  // Load user name from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('hydra_userName');
+    if (saved) setUserName(saved);
+  }, []);
+
+  useEffect(() => {
+    if (userName) localStorage.setItem('hydra_userName', userName);
+  }, [userName]);
+
   // Init
   useEffect(() => {
     if (loading) return;
@@ -749,6 +792,10 @@ export default function Home() {
       if ((e.ctrlKey || e.metaKey) && e.key === ',') {
         e.preventDefault();
         setSettingsOpen((v) => !v);
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'M') {
+        e.preventDefault();
+        setMemoryPanelOpen((v) => !v);
       }
     };
     document.addEventListener('keydown', onKey);
@@ -2101,6 +2148,23 @@ export default function Home() {
                   </option>
                 ))}
               </select>
+              <input
+                type="text"
+                placeholder="Your name"
+                value={userName}
+                onChange={(e) => setUserName(e.target.value)}
+                className="w-24 bg-terminal-elevated text-xs rounded-lg px-3 py-1.5 border border-terminal-border text-terminal-text focus:outline-none focus:border-terminal-accent/50 font-mono placeholder-terminal-muted transition-colors"
+                data-tooltip="Set your name (remembered across sessions)"
+              />
+              <button
+                onClick={() => setMemoryPanelOpen((v) => !v)}
+                className="p-2 rounded-lg text-terminal-muted hover:text-terminal-accent3 hover:bg-terminal-accent3/5 transition-all"
+                data-tooltip="Memory (Ctrl+Shift+M)"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              </button>
               <button
                 onClick={() => setChatSettingsOpen(true)}
                 className="p-2 rounded-lg text-terminal-muted hover:text-terminal-accent hover:bg-terminal-accent/5 transition-all"
@@ -2185,6 +2249,21 @@ export default function Home() {
                 </option>
               ))}
             </select>
+            <input
+              type="text"
+              placeholder="Name"
+              value={userName}
+              onChange={(e) => setUserName(e.target.value)}
+              className="w-20 bg-terminal-elevated text-xs rounded-lg px-2 py-1.5 border border-terminal-border text-terminal-text focus:outline-none focus:border-terminal-accent/50 font-mono placeholder-terminal-muted transition-colors"
+            />
+            <button
+              onClick={() => setMemoryPanelOpen((v) => !v)}
+              className="p-2 rounded-lg text-terminal-muted hover:text-terminal-accent3 hover:bg-terminal-accent3/5 transition-all"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </button>
             <button
               onClick={() => setChatSettingsOpen(true)}
               className="p-2 rounded-lg text-terminal-muted hover:text-terminal-accent hover:bg-terminal-accent/5 transition-all"
@@ -2544,6 +2623,8 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      <MemoryPanel open={memoryPanelOpen} onClose={() => setMemoryPanelOpen(false)} />
 
       {confirmState && (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm">

@@ -39,6 +39,15 @@ export interface StreamChunk {
   error?: string;
 }
 
+export interface Memory {
+  id: string;
+  key: string;
+  content: string;
+  type: 'task' | 'fact' | 'preference';
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface IntentResult {
   type: 'chat' | 'create_file' | 'explain_only';
   error?: string;
