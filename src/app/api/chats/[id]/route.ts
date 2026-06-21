@@ -7,7 +7,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const chat = getChat(id);
+  const chat = await getChat(id);
   if (!chat) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
@@ -21,9 +21,9 @@ export async function PATCH(
   const { id } = await params;
   try {
     const { title, model } = await request.json();
-    if (title !== undefined) renameChat(id, title);
-    if (model !== undefined && MODELS.includes(model)) setChatModel(id, model);
-    const chat = getChat(id);
+    if (title !== undefined) await renameChat(id, title);
+    if (model !== undefined && MODELS.includes(model)) await setChatModel(id, model);
+    const chat = await getChat(id);
     if (!chat) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
@@ -38,6 +38,6 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  deleteChat(id);
+  await deleteChat(id);
   return NextResponse.json({ ok: true });
 }

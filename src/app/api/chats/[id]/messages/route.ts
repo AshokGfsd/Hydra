@@ -12,7 +12,7 @@ export async function POST(
       return NextResponse.json({ error: 'role and content required' }, { status: 400 });
     }
     
-    const chat = addMessage(id, role, content, reasoning);
+    const chat = await addMessage(id, role, content, reasoning);
     if (!chat) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
